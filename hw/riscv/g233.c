@@ -42,6 +42,9 @@
 #include "hw/riscv/riscv_hart.h"
 #include "hw/gpio/sifive_gpio.h"
 #include "hw/timer/sifive_pwm.h"
+#include "hw/ssi/ssi.h"
+#include "hw/block/flash.h"
+#include "system/block-backend.h"
 
 // 起始地址和大小
 static const MemMapEntry g233_memmap[] = {
@@ -51,6 +54,7 @@ static const MemMapEntry g233_memmap[] = {
     [G233_DEV_UART0] =    { 0x10000000,     0x1000 },
     [G233_DEV_GPIO0] =    { 0x10012000,     0x1000 },
     [G233_DEV_PWM0] =     { 0x10015000,     0x1000 },
+    [G233_DEV_SPI0] =     { 0x10018000,     0x1000 },
     [G233_DEV_DRAM] =     { 0x80000000, 0x40000000 },
 };
 
@@ -66,6 +70,8 @@ static void g233_soc_init(Object *obj)
     object_initialize_child(OBJECT(s), "cpus", &s->cpus, TYPE_RISCV_HART_ARRAY);
     /* Initialize GPIO */
     object_initialize_child(OBJECT(s), "gpio0", &s->gpio, TYPE_SIFIVE_GPIO);
+    /* Initialize SPI0 */
+    object_initialize_child(OBJECT(s), "spi0", &s->spi0, TYPE_G233_SPI);
 }
 
 static void g233_soc_realize(DeviceState *dev, Error **errp)
@@ -141,6 +147,14 @@ static void g233_soc_realize(DeviceState *dev, Error **errp)
     create_unimplemented_device("riscv.g233.pwm0",
         memmap[G233_DEV_PWM0].base, memmap[G233_DEV_PWM0].size);
 
+    /* SPI0 */
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->spi0), errp)) {
+        return;
+    }
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->spi0), 0, memmap[G233_DEV_SPI0].base);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->spi0), 0,
+                       qdev_get_gpio_in(DEVICE(s->plic), G233_SPI0_IRQ));
+
 }
 
 static void g233_soc_class_init(ObjectClass *oc, const void *data)
@@ -186,6 +200,33 @@ static void g233_machine_init(MachineState *machine)
     object_initialize_child(OBJECT(machine), "soc", &s->soc,
                             TYPE_RISCV_G233_SOC);
     qdev_realize(DEVICE(&s->soc), NULL, &error_fatal);
+
+    /* Connect Flash devices to SPI */
+    BlockBackend *blk0, *blk1;
+    DeviceState *flash_dev1, *flash_dev2;
+    qemu_irq flash_cs1, flash_cs2;
+
+    /* Connect first flash (W25X16 - 2MB) to SPI */
+    flash_dev1 = qdev_new("w25x16");
+    qdev_prop_set_uint8(flash_dev1, "cs", 0);
+    blk0 = blk_by_name("flash0");
+    if (blk0) {
+        qdev_prop_set_drive_err(flash_dev1, "drive", blk0, &error_fatal);
+    }
+    qdev_realize_and_unref(flash_dev1, BUS(s->soc.spi0.spi), &error_fatal);
+    flash_cs1 = qdev_get_gpio_in_named(flash_dev1, SSI_GPIO_CS, 0);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->soc.spi0), 1, flash_cs1);
+
+    /* Connect second flash (W25X32 - 4MB) to SPI */
+    flash_dev2 = qdev_new("w25x32");
+    qdev_prop_set_uint8(flash_dev2, "cs", 1);
+    blk1 = blk_by_name("flash1");
+    if (blk1) {
+        qdev_prop_set_drive_err(flash_dev2, "drive", blk1, &error_fatal);
+    }
+    qdev_realize_and_unref(flash_dev2, BUS(s->soc.spi0.spi), &error_fatal);
+    flash_cs2 = qdev_get_gpio_in_named(flash_dev2, SSI_GPIO_CS, 0);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->soc.spi0), 2, flash_cs2);
 
 
     /* Data Memory(DDR RAM) */
